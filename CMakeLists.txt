@@ -31,8 +31,9 @@ project(tritonbackend LANGUAGES C CXX)
 #
 # Options
 #
-option(TRITON_ENABLE_GPU "Enable GPU support in backend utilities" ON)
+option(TRITON_ENABLE_GPU "Enable GPU support in backend utilities" OFF)
 option(TRITON_ENABLE_MALI_GPU "Enable Arm MALI GPU support in backend utilities" OFF)
+option(TRITON_ENABLE_ROCM "Enable AMD GPU support in backend utilities" ON)
 option(TRITON_ENABLE_STATS "Include statistics collections in backend utilities" ON)
 # Default OFF unless backend explicitly request to use provided implementation
 option(TRITON_ENABLE_MEMORY_TRACKER "Include device memory tracker in backend utilities" OFF)
@@ -40,6 +41,12 @@ option(TRITON_ENABLE_MEMORY_TRACKER "Include device memory tracker in backend ut
 set(TRITON_REPO_ORGANIZATION "https://github.com/triton-inference-server" CACHE STRING "Git repository to pull from")
 set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
 set(TRITON_CORE_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/core repo")
+set(TRITON_BUILD_ROCM_HOME "/opt/rocm" CACHE PATH "ROCm install path")
+
+# ROCm include path
+if(TRITON_ENABLE_ROCM)
+  include_directories(/opt/rocm/include)
+endif()
 
 #
 # Setting C++ standard
@@ -90,28 +97,40 @@ if(${TRITON_ENABLE_GPU})
 endif() # TRITON_ENABLE_GPU
 
 #
+# ROCm / HIP
+#
+if(${TRITON_ENABLE_ROCM})
+  find_package(hip REQUIRED)
+  find_package(HIP)
+  enable_language(HIP)
+endif() # TRITON_ENABLE_ROCM
+
+#
 # Backend library containing useful source and utilities
 #
-set(SRC_FILES
-  "src/backend_common.cc"
-  "src/backend_input_collector.cc"
-  "src/backend_memory.cc"
-  "src/backend_model_instance.cc"
-  "src/backend_model.cc"
-  "src/backend_output_responder.cc"
-)
 
-if(${TRITON_ENABLE_GPU})
-  set(SRC_FILES ${SRC_FILES} "src/kernel.h")
-  if(${TRITON_ENABLE_MEMORY_TRACKER})
-    set(SRC_FILES ${SRC_FILES} "src/device_memory_tracker.cc")
-  endif() # TRITON_ENABLE_MEMORY_TRACKER
-endif() # TRITON_ENABLE_GPU
+if(NOT ${TRITON_ENABLE_ROCM})
+  set(SRC_FILES
+    "src/backend_common.cc"
+    "src/backend_input_collector.cc"
+    "src/backend_memory.cc"
+    "src/backend_model_instance.cc"
+    "src/backend_model.cc"
+    "src/backend_output_responder.cc"
+  )
 
-add_library(
-  triton-backend-utils
-  ${SRC_FILES}
-)
+  if(${TRITON_ENABLE_GPU})
+    set(SRC_FILES ${SRC_FILES} "src/kernel.h")
+    if(${TRITON_ENABLE_MEMORY_TRACKER})
+      set(SRC_FILES ${SRC_FILES} "src/device_memory_tracker.cc")
+    endif() # TRITON_ENABLE_MEMORY_TRACKER
+  endif() # TRITON_ENABLE_GPU
+
+  add_library(
+    triton-backend-utils
+    ${SRC_FILES}
+  )
+endif()
 
 if(${TRITON_ENABLE_GPU})
   add_library(
@@ -130,18 +149,81 @@ if(${TRITON_ENABLE_GPU})
 
 endif() # TRITON_ENABLE_GPU
 
+#
+# ROCm hipification and build
+#
+if(${TRITON_ENABLE_ROCM})
+  set(TRITON_ROCM_HOME /opt/rocm)
+
+  list(APPEND CMAKE_PREFIX_PATH /opt/rocm /opt/rocm/llvm $ENV{ROCM_PATH} $ENV{HIP_PATH})
+  list(APPEND CMAKE_PREFIX_PATH /opt/rocm/hcc /opt/rocm/hip /opt/rocm)
+
+  if(NOT CMAKE_HIP_COMPILER)
+    set(CMAKE_HIP_COMPILER "${TRITON_ROCM_HOME}/llvm/bin/clang++")
+  endif()
+
+  if(NOT CMAKE_HIP_ARCHITECTURES)
+    set(CMAKE_HIP_ARCHITECTURES "gfx906;gfx908;gfx90a;gfx1030;gfx1100;gfx1101;gfx940;gfx941;gfx942")
+  endif()
+
+  file(GLOB rocm_cmake_components ${TRITON_ROCM_HOME}/lib/cmake/*)
+  list(APPEND CMAKE_PREFIX_PATH ${rocm_cmake_components})
+
+  if(NOT TRITON_HIPIFY_PERL)
+    find_path(HIPIFY_PERL_PATH
+      NAMES hipify-perl
+      HINTS
+      ${TRITON_BUILD_ROCM_HOME}/bin
+      ${TRITON_BUILD_ROCM_HOME}/hip/bin)
+    if(HIPIFY_PERL_PATH-NOTFOUND)
+      MESSAGE(FATAL_ERROR "hipify-perl not found")
+    endif()
+    set(TRITON_HIPIFY_PERL ${HIPIFY_PERL_PATH}/hipify-perl)
+  endif() #TRITON_HIPIFY_PERL
+
+  include(triton_rocm_hipify.cmake)
+  set(REPO_ROOT ${PROJECT_SOURCE_DIR})
+  hipify(src "" triton_hipified_cc_srcs triton_hipified_cu_srcs)
+
+  add_custom_target(generated_hipified_files DEPENDS
+    ${triton_hipified_cc_srcs}
+    ${triton_hipified_cu_srcs})
+
+  add_library(
+    triton-backend-utils
+    ${triton_hipified_cc_srcs}
+  )
+
+  add_library(
+    kernel_library_new
+    ${triton_hipified_cu_srcs}
+  )
+  set_property(TARGET kernel_library_new PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif() # TRITON_ENABLE_ROCM
+
 add_library(
   TritonBackend::triton-backend-utils ALIAS triton-backend-utils
 )
 
-target_include_directories(
-  triton-backend-utils
-  PUBLIC
-    $<INSTALL_INTERFACE:include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
+if(${TRITON_ENABLE_ROCM})
+  target_include_directories(
+    triton-backend-utils
+    PUBLIC
+      $<INSTALL_INTERFACE:include>
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/amdgpu/include>
+    PRIVATE
+      ${CMAKE_CURRENT_BINARY_DIR}/amdgpu/src
+  )
+else()
+  target_include_directories(
+    triton-backend-utils
+    PUBLIC
+      $<INSTALL_INTERFACE:include>
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
   message("Using MSVC as compiler, default target on Windows 10. "
@@ -154,7 +236,7 @@ target_compile_options(
   triton-backend-utils
   PRIVATE
   $<$<OR:$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>,$<CXX_COMPILER_ID:GNU>>:
-    -Wall -Wextra -Wno-unused-parameter>
+    -Wall -Wextra -Wno-unused-parameter -Werror -Wno-unused-result>
   $<$<CXX_COMPILER_ID:MSVC>:/Wall /D_WIN32_WINNT=0x0A00 /EHsc /Zc:preprocessor>
 )
 
@@ -179,6 +261,14 @@ target_compile_definitions(
   PUBLIC TRITON_ENABLE_MALI_GPU=1
 )
 endif() # TRITON_ENABLE_MALI_GPU
+
+# TRITON_ENABLE_ROCM exposed in header so set PUBLIC
+if(${TRITON_ENABLE_ROCM})
+  target_compile_definitions(
+    triton-backend-utils
+    PUBLIC TRITON_ENABLE_ROCM=1
+  )
+endif() # TRITON_ENABLE_ROCM
 
 # TRITON_ENABLE_STATS exposed in header so set PUBLIC
 if(${TRITON_ENABLE_STATS})
@@ -221,6 +311,16 @@ if(${TRITON_ENABLE_GPU})
   endif() # TRITON_ENABLE_MEMORY_TRACKER
 endif() # TRITON_ENABLE_GPU
 
+if(${TRITON_ENABLE_ROCM})
+  target_link_libraries(
+    triton-backend-utils
+    PUBLIC
+      hip::host
+    PRIVATE
+      kernel_library_new
+  )
+endif() #TRITON_ENABLE_ROCM
+
 #
 # Install
 #
@@ -247,10 +347,28 @@ if(${TRITON_ENABLE_GPU})
   )
 endif() # TRITON_ENABLE_GPU
 
-install(
-  DIRECTORY include/
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
+if(${TRITON_ENABLE_ROCM})
+  install(
+    TARGETS
+      kernel_library_new
+    EXPORT
+      triton-backend-targets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+endif() # TRITON_ENABLE_ROCM
+
+if(${TRITON_ENABLE_ROCM})
+  install(
+    DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/amdgpu/include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+else()
+  install(
+    DIRECTORY include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+endif() # TRITON_ENABLE_ROCM
 
 install(
   EXPORT
