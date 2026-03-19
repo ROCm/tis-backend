@@ -39,6 +39,7 @@ project(tutorialminimalbackend LANGUAGES C CXX)
 #
 option(TRITON_ENABLE_GPU "Enable GPU support in backend" OFF)
 option(TRITON_ENABLE_STATS "Include statistics collections in backend" ON)
+option(TRITON_ENABLE_ROCM "Enable ROCm support in backend" OFF)
 
 set(TRITON_REPO_ORGANIZATION "https://github.com/triton-inference-server" CACHE STRING "Git repository to pull from")
 set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
@@ -62,21 +63,31 @@ endif()
 #
 include(FetchContent)
 
+if(TRITON_ENABLE_ROCM)
+  set(_COMMON_REPO_URL "https://github.com/triton-inference-server/common.git")
+  set(_CORE_REPO_URL "${TRITON_REPO_ORGANIZATION}/triton-inference-server-core.git")
+  set(_BACKEND_REPO_URL "${TRITON_REPO_ORGANIZATION}/triton-inference-server-backend.git")
+else()
+  set(_COMMON_REPO_URL "${TRITON_REPO_ORGANIZATION}/common.git")
+  set(_CORE_REPO_URL "${TRITON_REPO_ORGANIZATION}/core.git")
+  set(_BACKEND_REPO_URL "${TRITON_REPO_ORGANIZATION}/backend.git")
+endif()
+
 FetchContent_Declare(
   repo-common
-  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/common.git
+  GIT_REPOSITORY ${_COMMON_REPO_URL}
   GIT_TAG ${TRITON_COMMON_REPO_TAG}
   GIT_SHALLOW ON
 )
 FetchContent_Declare(
   repo-core
-  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/core.git
+  GIT_REPOSITORY ${_CORE_REPO_URL}
   GIT_TAG ${TRITON_CORE_REPO_TAG}
   GIT_SHALLOW ON
 )
 FetchContent_Declare(
   repo-backend
-  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/backend.git
+  GIT_REPOSITORY ${_BACKEND_REPO_URL}
   GIT_TAG ${TRITON_BACKEND_REPO_TAG}
   GIT_SHALLOW ON
 )
