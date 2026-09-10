@@ -243,7 +243,7 @@ GetByteSize(
     return cnt;
   }
 
-  if ((cnt > INT64_MAX / dt_size)) {
+  if ((cnt > INT64_MAX / static_cast<int64_t>(dt_size))) {
     return -3;
   }
   return cnt * dt_size;
